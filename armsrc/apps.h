@@ -15,16 +15,15 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "common.h"
+#include "usb_cmd.h"
 #include "hitag2.h"
 #include "hitagS.h"
 #include "mifare.h"
 #include "../common/crc32.h"
 #include "BigBuf.h"
-#include "fpgaloader.h"
 
 extern const uint8_t OddByteParity[256];
 extern int rsamples;   // = 0;
-extern int tracing;    // = TRUE;
 extern uint8_t trigger;
 
 // This may be used (sparingly) to declare a function to be copied to
@@ -41,9 +40,10 @@ void Dbprintf(const char *fmt, ...);
 void Dbhexdump(int len, uint8_t *d, bool bAsci);
 
 // ADC Vref = 3300mV, and an (10M+1M):1M voltage divider on the HF input can measure voltages up to 36300 mV
-#define MAX_ADC_HF_VOLTAGE 36300
+#define MAX_ADC_HF_VOLTAGE_LOW   36300
 // ADC Vref = 3300mV, and an (10000k+240k):240k voltage divider on the LF input can measure voltages up to 140800 mV
-#define MAX_ADC_LF_VOLTAGE 140800
+#define MAX_ADC_HF_VOLTAGE_HIGH 140800
+#define MAX_ADC_LF_VOLTAGE      140800
 int AvgAdc(int ch);
 
 void ToSendStuffBit(int b);
@@ -67,16 +67,16 @@ void AcquireTiType(void);
 void AcquireRawBitsTI(void);
 void SimulateTagLowFrequency(int period, int gap, int ledcontrol);
 void SimulateTagLowFrequencyBidir(int divisor, int max_bitlen);
-void CmdHIDsimTAG(int hi, int lo, int ledcontrol);
+void CmdHIDsimTAG(int hi2, int hi, int lo, int ledcontrol);
 void CmdFSKsimTAG(uint16_t arg1, uint16_t arg2, size_t size, uint8_t *BitStream);
 void CmdASKsimTag(uint16_t arg1, uint16_t arg2, size_t size, uint8_t *BitStream);
 void CmdPSKsimTag(uint16_t arg1, uint16_t arg2, size_t size, uint8_t *BitStream);
-void CmdHIDdemodFSK(int findone, int *high, int *low, int ledcontrol);
+void CmdHIDdemodFSK(int findone, int *high2, int *high, int *low, int ledcontrol);
 void CmdAWIDdemodFSK(int findone, int *high, int *low, int ledcontrol); // Realtime demodulation mode for AWID26
 void CmdEM410xdemod(int findone, int *high, int *low, int ledcontrol);
 void CmdIOdemodFSK(int findone, int *high, int *low, int ledcontrol);
 void CopyIOtoT55x7(uint32_t hi, uint32_t lo); // Clone an ioProx card to T5557/T5567
-void CopyHIDtoT55x7(uint32_t hi2, uint32_t hi, uint32_t lo, uint8_t longFMT); // Clone an HID card to T5557/T5567
+void CopyHIDtoT55x7(uint32_t hi2, uint32_t hi, uint32_t lo, uint8_t longFMT, uint8_t preamble); // Clone an HID-like card to T5557/T5567
 void CopyVikingtoT55xx(uint32_t block1, uint32_t block2, uint8_t Q5);
 void WriteEM410x(uint32_t card, uint32_t id_hi, uint32_t id_lo);
 void CopyIndala64toT55x7(uint32_t hi, uint32_t lo); // Clone Indala 64-bit tag by UID to T55x7
@@ -88,7 +88,8 @@ void T55xxWakeUp(uint32_t Pwd);
 void TurnReadLFOn();
 //void T55xxReadTrace(void);
 void EM4xReadWord(uint8_t Address, uint32_t Pwd, uint8_t PwdMode);
-void EM4xWriteWord(uint32_t Data, uint8_t Address, uint32_t Pwd, uint8_t PwdMode);
+void EM4xWriteWord(uint32_t flag, uint32_t Data, uint32_t Pwd);
+void Cotag(uint32_t arg0);
 
 /// iso14443.h
 void SimulateIso14443bTag(void);
@@ -97,14 +98,8 @@ void ReadSTMemoryIso14443b(uint32_t);
 void RAMFUNC SnoopIso14443b(void);
 void SendRawCommand14443B(uint32_t, uint32_t, uint8_t, uint8_t[]);
 
-/// iso14443a.h
-void RAMFUNC SnoopIso14443a(uint8_t param);
-void SimulateIso14443aTag(int tagType, int uid_1st, int uid_2nd, byte_t* data);
-void ReaderIso14443a(UsbCommand * c);
 // Also used in iclass.c
-bool RAMFUNC LogTrace(const uint8_t *btBytes, uint16_t len, uint32_t timestamp_start, uint32_t timestamp_end, uint8_t *parity, bool readerToTag);
 void GetParity(const uint8_t *pbtCmd, uint16_t len, uint8_t *parity);
-void iso14a_set_trigger(bool enable);
 
 void RAMFUNC SniffMifare(uint8_t param);
 
@@ -113,8 +108,6 @@ void EPA_PACE_Collect_Nonce(UsbCommand * c);
 void EPA_PACE_Replay(UsbCommand *c);
 
 // mifarecmd.h
-void ReaderMifare(bool first_try);
-int32_t dist_nt(uint32_t nt1, uint32_t nt2);
 void MifareReadBlock(uint8_t arg0, uint8_t arg1, uint8_t arg2, uint8_t *data);
 void MifareUReadBlock(uint8_t arg0, uint8_t arg1, uint8_t *datain);
 void MifareUC_Auth(uint8_t arg0, uint8_t *datain);
@@ -124,14 +117,15 @@ void MifareWriteBlock(uint8_t arg0, uint8_t arg1, uint8_t arg2, uint8_t *datain)
 //void MifareUWriteBlockCompat(uint8_t arg0,uint8_t *datain);
 void MifareUWriteBlock(uint8_t arg0, uint8_t arg1, uint8_t *datain);
 void MifareNested(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint8_t *datain);
-void MifareChkKeys(uint16_t arg0, uint8_t arg1, uint8_t arg2, uint8_t *datain);
-void Mifare1ksim(uint8_t arg0, uint8_t arg1, uint8_t arg2, uint8_t *datain);
+void MifareAcquireEncryptedNonces(uint32_t arg0, uint32_t arg1, uint32_t flags, uint8_t *datain);
+void MifareChkKeys(uint16_t arg0, uint16_t arg1, uint8_t arg2, uint8_t *datain);
 void MifareSetDbgLvl(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint8_t *datain);
 void MifareEMemClr(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint8_t *datain);
 void MifareEMemSet(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint8_t *datain);
 void MifareEMemGet(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint8_t *datain);
 void MifareECardLoad(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint8_t *datain);
-void MifareCSetBlock(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint8_t *datain);  // Work with "magic Chinese" card
+void MifareCWipe(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint8_t *datain);       // Work with "magic Chinese" card
+void MifareCSetBlock(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint8_t *datain);  
 void MifareCGetBlock(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint8_t *datain);
 void MifareCIdent();  // is "magic chinese" card?
 void MifareUSetPwd(uint8_t arg0, uint8_t *datain);
@@ -148,18 +142,7 @@ void 	MifareDES_Auth1(uint8_t arg0,uint8_t arg1,uint8_t arg2, uint8_t *datain);
 void 	ReaderMifareDES(uint32_t param, uint32_t param2, uint8_t * datain);
 int 	DesfireAPDU(uint8_t *cmd, size_t cmd_len, uint8_t *dataout);
 size_t	CreateAPDU( uint8_t *datain, size_t len, uint8_t *dataout);
-void 	OnSuccess();
-void 	OnError(uint8_t reason);
 
-
-/// iso15693.h
-void RecordRawAdcSamplesIso15693(void);
-void AcquireRawAdcSamplesIso15693(void);
-void ReaderIso15693(uint32_t parameter);	// Simulate an ISO15693 reader - greg
-void SimTagIso15693(uint32_t parameter, uint8_t *uid);	// simulate an ISO15693 tag - greg
-void BruteforceIso15693Afi(uint32_t speed); // find an AFI of a tag - atrox
-void DirectTag15693Command(uint32_t datalen,uint32_t speed, uint32_t recv, uint8_t data[]); // send arbitrary commands from CLI - atrox 
-void SetDebugIso15693(uint32_t flag);
 
 /// iclass.h
 void RAMFUNC SnoopIClass(void);
@@ -175,23 +158,8 @@ void iClass_Dump(uint8_t blockno, uint8_t numblks);
 void iClass_Clone(uint8_t startblock, uint8_t endblock, uint8_t *data);
 void iClass_ReadCheck(uint8_t	blockNo, uint8_t keyType);
 
-// hitag2.h
-void SnoopHitag(uint32_t type);
-void SimulateHitagTag(bool tag_mem_supplied, byte_t* data);
-void ReaderHitag(hitag_function htf, hitag_data* htd);
-
-//hitagS.h
-void SimulateHitagSTag(bool tag_mem_supplied, byte_t* data);
-void ReadHitagS(hitag_function htf, hitag_data* htd);
-void WritePageHitagS(hitag_function htf, hitag_data* htd,int page);
-void check_challenges(bool file_given, byte_t* data);
-
-
 // cmd.h
 bool cmd_receive(UsbCommand* cmd);
 bool cmd_send(uint32_t cmd, uint32_t arg0, uint32_t arg1, uint32_t arg2, void* data, size_t len);
-
-/// util.h
-void HfSnoop(int , int);
 
 #endif

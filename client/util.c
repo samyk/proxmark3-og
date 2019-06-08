@@ -9,12 +9,25 @@
 //-----------------------------------------------------------------------------
 
 #include "util.h"
+
+#include <stdint.h>
+#include <string.h>
+#include <ctype.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <time.h>
+#include <stdarg.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #define MAX_BIN_BREAK_LENGTH   (3072+384+1)
 
 #ifndef _WIN32
 #include <termios.h>
 #include <sys/ioctl.h> 
-
+#include <unistd.h>
 
 int ukbhit(void)
 {
@@ -22,25 +35,40 @@ int ukbhit(void)
   int error;
   static struct termios Otty, Ntty;
 
-
-  if ( tcgetattr( 0, &Otty) == -1 ) return -1;
+  if ( tcgetattr(STDIN_FILENO, &Otty) == -1 ) return -1;
   Ntty = Otty;
 
-  Ntty.c_iflag          = 0;       /* input mode                */
-  Ntty.c_oflag          = 0;       /* output mode               */
-  Ntty.c_lflag         &= ~ICANON; /* raw mode */
-  Ntty.c_cc[VMIN]       = CMIN;    /* minimum time to wait      */
-  Ntty.c_cc[VTIME]      = CTIME;   /* minimum characters to wait for */
-
-  if (0 == (error = tcsetattr(0, TCSANOW, &Ntty))) {
-    error += ioctl(0, FIONREAD, &cnt);
-    error += tcsetattr(0, TCSANOW, &Otty);
+  Ntty.c_iflag          = 0x0000;   // input mode
+  Ntty.c_oflag          = 0x0000;   // output mode
+  Ntty.c_lflag         &= ~ICANON;  // control mode = raw
+  Ntty.c_cc[VMIN]       = 1;        // return if at least 1 character is in the queue
+  Ntty.c_cc[VTIME]      = 0;   	    // no timeout. Wait forever
+  
+  if (0 == (error = tcsetattr(STDIN_FILENO, TCSANOW, &Ntty))) {   // set new attributes
+    error += ioctl(STDIN_FILENO, FIONREAD, &cnt);                 // get number of characters availabe
+    error += tcsetattr(STDIN_FILENO, TCSANOW, &Otty);             // reset attributes
   }
 
   return ( error == 0 ? cnt : -1 );
 }
 
-#else
+char getch(void)
+{
+	char c;
+	int error;
+	struct termios Otty, Ntty;
+	if ( tcgetattr(STDIN_FILENO, &Otty) == -1 ) return -1;
+	Ntty = Otty;
+	Ntty.c_lflag &= ~ICANON; /* disable buffered i/o */
+	if (0 == (error = tcsetattr(STDIN_FILENO, TCSANOW, &Ntty))) {   // set new attributes
+		c = getchar();
+		error += tcsetattr(STDIN_FILENO, TCSANOW, &Otty);           // reset attributes
+	}
+	return ( error == 0 ? c : -1 );
+}
+
+#else // _WIN32
+
 #include <conio.h>
 int ukbhit(void) {
 	return kbhit();
@@ -89,39 +117,100 @@ void AddLogCurrentDT(char *fileName) {
 	AddLogLine(fileName, "\nanticollision: ", buff);
 }
 
-void FillFileNameByUID(char *fileName, uint8_t * uid, char *ext, int byteCount) {
+void FillFileNameByUID(char *fileName, uint8_t *uid, char *ext, int byteCount) {
 	char * fnameptr = fileName;
-	memset(fileName, 0x00, 200);
 	
 	for (int j = 0; j < byteCount; j++, fnameptr += 2)
 		sprintf(fnameptr, "%02x", (unsigned int) uid[j]); 
 	sprintf(fnameptr, "%s", ext); 
 }
 
-// printing and converting functions
+// fill buffer from structure [{uint8_t data, size_t length},...]
+int FillBuffer(uint8_t *data, size_t maxDataLength, size_t *dataLength, ...) {
+	*dataLength = 0;
+	va_list valist;
+	va_start(valist, dataLength);
+	
+	uint8_t *vdata = NULL;
+	size_t vlength = 0;
+	do{
+		vdata = va_arg(valist, uint8_t *);
+		if (!vdata)
+			break;
+		
+		vlength = va_arg(valist, size_t);
+		if (*dataLength + vlength >  maxDataLength) {
+			va_end(valist);
+			return 1;
+		}
+		
+		memcpy(&data[*dataLength], vdata, vlength);
+		*dataLength += vlength;
+		
+	} while (vdata);
+	
+	va_end(valist);
 
-void print_hex(const uint8_t * data, const size_t len)
-{
-	size_t i;
-
-	for (i=0; i < len; i++)
-		printf("%02x ", data[i]);
-
-	printf("\n");
+	return 0;
 }
 
-char *sprint_hex(const uint8_t *data, const size_t len) {
-	
-	int maxLen = ( len > 1024/3) ? 1024/3 : len;
-	static char buf[1024];
-	memset(buf, 0x00, 1024);
-	char *tmp = buf;
-	size_t i;
+bool CheckStringIsHEXValue(const char *value) {
+	for (int i = 0; i < strlen(value); i++)
+		if (!isxdigit(value[i]))
+			return false;
 
-	for (i=0; i < maxLen; ++i, tmp += 3)
-		sprintf(tmp, "%02x ", (unsigned int) data[i]);
+	if (strlen(value) % 2)
+		return false;
+	
+	return true;
+}
+
+void hex_to_buffer(const uint8_t *buf, const uint8_t *hex_data, const size_t hex_len, const size_t hex_max_len, 
+	const size_t min_str_len, const size_t spaces_between, bool uppercase) {
+		
+	char *tmp = (char *)buf;
+	size_t i;
+	memset(tmp, 0x00, hex_max_len);
+
+	int maxLen = ( hex_len > hex_max_len) ? hex_max_len : hex_len;
+
+	for (i = 0; i < maxLen; ++i, tmp += 2 + spaces_between) {
+		sprintf(tmp, (uppercase) ? "%02X" : "%02x", (unsigned int) hex_data[i]); 
+		
+		for (int j = 0; j < spaces_between; j++)
+			sprintf(tmp + 2 + j, " ");
+	}
+	
+	i *= (2 + spaces_between);
+	int minStrLen = min_str_len > i ? min_str_len : 0;
+	if (minStrLen > hex_max_len)
+		minStrLen = hex_max_len;
+	for(; i < minStrLen; i++, tmp += 1) 
+		sprintf(tmp, " ");
+
+	return;
+}
+
+// printing and converting functions
+
+char *sprint_hex(const uint8_t *data, const size_t len) {
+	static char buf[4097] = {0};
+	
+	hex_to_buffer((uint8_t *)buf, data, len, sizeof(buf) - 1, 0, 1, false);
 
 	return buf;
+}
+
+char *sprint_hex_inrow_ex(const uint8_t *data, const size_t len, const size_t min_str_len) {
+	static char buf[4097] = {0};
+
+	hex_to_buffer((uint8_t *)buf, data, len, sizeof(buf) - 1, min_str_len, 0, false);
+
+	return buf;
+}
+
+char *sprint_hex_inrow(const uint8_t *data, const size_t len) {
+	return sprint_hex_inrow_ex(data, len, 0);
 }
 
 char *sprint_bin_break(const uint8_t *data, const size_t len, const uint8_t breaks) {
@@ -144,7 +233,7 @@ char *sprint_bin_break(const uint8_t *data, const size_t len, const uint8_t brea
 		if (data[in_index]<10)
 			sprintf(tmp++, "%u", (unsigned int) data[in_index]);
 		// check if a line break is needed and we have room to print it in our array
-		if ( (breaks > 0) && !((in_index+1) % breaks) && (out_index+1 != max_len) ) {
+		if ( (breaks > 0) && !((in_index+1) % breaks) && (out_index+1 < max_len) ) {
 			// increment and print line break
 			out_index++;
 			sprintf(tmp++, "%s","\n");
@@ -158,6 +247,30 @@ char *sprint_bin_break(const uint8_t *data, const size_t len, const uint8_t brea
 char *sprint_bin(const uint8_t *data, const size_t len) {
 	return sprint_bin_break(data, len, 0);
 }
+
+char *sprint_ascii_ex(const uint8_t *data, const size_t len, const size_t min_str_len) {
+	static char buf[1024];
+	char *tmp = buf;
+	memset(buf, 0x00, 1024);
+	size_t max_len = (len > 1010) ? 1010 : len;
+	size_t i = 0;
+	while(i < max_len){
+		char c = data[i];
+		tmp[i] = ((c < 32) || (c == 127)) ? '.' : c;
+		++i;
+	}
+	
+	int minStrLen = min_str_len > i ? min_str_len : 0;
+	for(; i < minStrLen; ++i) 
+		tmp[i] = ' ';
+	
+	return buf;
+}
+
+char *sprint_ascii(const uint8_t *data, const size_t len) {
+    return sprint_ascii_ex(data, len, 0);
+}
+
 void num_to_bytes(uint64_t n, size_t len, uint8_t* dest)
 {
 	while (len--) {
@@ -184,6 +297,24 @@ void num_to_bytebits(uint64_t	n, size_t len, uint8_t *dest) {
 	}
 }
 
+//least significant bit first
+void num_to_bytebitsLSBF(uint64_t n, size_t len, uint8_t *dest) {
+	for(int i = 0 ; i < len ; ++i) {
+		dest[i] =  n & 1;
+		n >>= 1;
+	}
+}
+
+// Swap bit order on a uint32_t value.  Can be limited by nrbits just use say 8bits reversal
+// And clears the rest of the bits.
+uint32_t SwapBits(uint32_t value, int nrbits) {
+	uint32_t newvalue = 0;
+	for(int i = 0; i < nrbits; i++) {
+		newvalue ^= ((value >> i) & 1) << (nrbits - 1 - i);
+	}
+	return newvalue;
+}
+
 // aa,bb,cc,dd,ee,ff,gg,hh, ii,jj,kk,ll,mm,nn,oo,pp
 // to
 // hh,gg,ff,ee,dd,cc,bb,aa, pp,oo,nn,mm,ll,kk,jj,ii
@@ -191,22 +322,21 @@ void num_to_bytebits(uint64_t	n, size_t len, uint8_t *dest) {
 uint8_t *SwapEndian64(const uint8_t *src, const size_t len, const uint8_t blockSize){
 	static uint8_t buf[64];
 	memset(buf, 0x00, 64);
-	uint8_t *tmp = buf;
 	for (uint8_t block=0; block < (uint8_t)(len/blockSize); block++){
 		for (size_t i = 0; i < blockSize; i++){
-			tmp[i+(blockSize*block)] = src[(blockSize-1-i)+(blockSize*block)];
+			buf[i+(blockSize*block)] = src[(blockSize-1-i)+(blockSize*block)];
 		}
 	}
-	return tmp;
+	return buf;
 }
 
 //assumes little endian
-char * printBits(size_t const size, void const * const ptr)
+char *printBits(size_t const size, void const * const ptr)
 {
     unsigned char *b = (unsigned char*) ptr;	
     unsigned char byte;
 	static char buf[1024];
-	char * tmp = buf;
+	char *tmp = buf;
     int i, j;
 
     for (i=size-1;i>=0;i--)
@@ -222,13 +352,30 @@ char * printBits(size_t const size, void const * const ptr)
 	return buf;
 }
 
+char *printBitsPar(const uint8_t *b, size_t len) {
+	static char buf1[512] = {0};
+	static char buf2[512] = {0};
+	static char *buf;
+	if (buf != buf1)
+		buf = buf1;
+	else
+		buf = buf2;
+	memset(buf, 0x00, 512);
+
+	for (int i = 0; i < len; i++) {
+		buf[i] = ((b[i / 8] << (i % 8)) & 0x80) ? '1':'0';
+	}
+	return buf;
+}
+
+
 //  -------------------------------------------------------------------------
 //  string parameters lib
 //  -------------------------------------------------------------------------
 
 //  -------------------------------------------------------------------------
 //  line     - param line
-//  bg, en   - symbol numbers in param line of beginning an ending parameter
+//  bg, en   - symbol numbers in param line of beginning and ending parameter
 //  paramnum - param number (from 0)
 //  -------------------------------------------------------------------------
 int param_getptr(const char *line, int *bg, int *en, int paramnum)
@@ -261,13 +408,28 @@ int param_getptr(const char *line, int *bg, int *en, int paramnum)
 }
 
 
-char param_getchar(const char *line, int paramnum)
+int param_getlength(const char *line, int paramnum)
 {
+	int bg, en;
+	
+	if (param_getptr(line, &bg, &en, paramnum)) return 0;
+
+	return en - bg + 1;
+}
+
+char param_getchar(const char *line, int paramnum) {
+	return param_getchar_indx(line, 0, paramnum);
+}
+
+char param_getchar_indx(const char *line, int indx, int paramnum) {
 	int bg, en;
 	
 	if (param_getptr(line, &bg, &en, paramnum)) return 0x00;
 
-	return line[bg];
+	if (bg + indx > en)
+		return '\0';
+	
+	return line[bg + indx];
 }
 
 uint8_t param_get8(const char *line, int paramnum)
@@ -332,8 +494,6 @@ uint64_t param_get64ex(const char *line, int paramnum, int deflt, int base)
 		return strtoull(&line[bg], NULL, base);
 	else
 		return deflt;
-
-	return 0;
 }
 
 int param_gethex(const char *line, int paramnum, uint8_t * data, int hexcnt)
@@ -349,7 +509,7 @@ int param_gethex(const char *line, int paramnum, uint8_t * data, int hexcnt)
 		return 1;
 
 	for(i = 0; i < hexcnt; i += 2) {
-		if (!(isxdigit(line[bg + i]) && isxdigit(line[bg + i + 1])) )	return 1;
+		if (!(isxdigit((unsigned char)line[bg + i]) && isxdigit((unsigned char)line[bg + i + 1])) )	return 1;
 		
 		sscanf((char[]){line[bg + i], line[bg + i + 1], 0}, "%X", &temp);
 		data[i / 2] = temp & 0xff;
@@ -357,7 +517,8 @@ int param_gethex(const char *line, int paramnum, uint8_t * data, int hexcnt)
 
 	return 0;
 }
-int param_gethex_ex(const char *line, int paramnum, uint8_t * data, int *hexcnt)
+
+int param_gethex_ex(const char *line, int paramnum, uint8_t *data, int *hexcnt)
 {
 	int bg, en, temp, i;
 
@@ -366,12 +527,14 @@ int param_gethex_ex(const char *line, int paramnum, uint8_t * data, int *hexcnt)
 	
 	if (param_getptr(line, &bg, &en, paramnum)) return 1;
 
+	if (en - bg + 1 > *hexcnt) return 1;
+	
 	*hexcnt = en - bg + 1;
 	if (*hexcnt % 2) //error if not complete hex bytes
 		return 1;
 
 	for(i = 0; i < *hexcnt; i += 2) {
-		if (!(isxdigit(line[bg + i]) && isxdigit(line[bg + i + 1])) )	return 1;
+		if (!(isxdigit((unsigned char)line[bg + i]) && isxdigit((unsigned char)line[bg + i + 1])) )	return 1;
 		
 		sscanf((char[]){line[bg + i], line[bg + i + 1], 0}, "%X", &temp);
 		data[i / 2] = temp & 0xff;
@@ -379,11 +542,66 @@ int param_gethex_ex(const char *line, int paramnum, uint8_t * data, int *hexcnt)
 
 	return 0;
 }
-int param_getstr(const char *line, int paramnum, char * str)
+
+int param_gethex_to_eol(const char *line, int paramnum, uint8_t * data, int maxdatalen, int *datalen) {
+	int bg, en;
+	uint32_t temp;
+	char buf[5] = {0};
+
+	if (param_getptr(line, &bg, &en, paramnum)) return 1;
+
+	*datalen = 0;
+	
+	int indx = bg;
+	while (line[indx]) {
+		if (line[indx] == '\t' || line[indx] == ' ') {
+			indx++;
+			continue;
+		}
+		
+		if (isxdigit((unsigned char)line[indx])) {
+			buf[strlen(buf) + 1] = 0x00;
+			buf[strlen(buf)] = line[indx];
+		} else {
+			// if we have symbols other than spaces and hex
+			return 1;
+		}				
+
+		if (*datalen >= maxdatalen) {
+			// if we dont have space in buffer and have symbols to translate
+			return 2;
+		}
+
+		if (strlen(buf) >= 2) {
+			sscanf(buf, "%x", &temp);
+			data[*datalen] = (uint8_t)(temp & 0xff);
+			*buf = 0;
+			(*datalen)++;
+		}
+		
+		indx++;
+	}
+
+	if (strlen(buf) > 0) 
+		//error when not completed hex bytes
+		return 3;
+		
+	return 0;
+}
+
+int param_getstr(const char *line, int paramnum, char * str, size_t buffersize)
 {
 	int bg, en;
 
-	if (param_getptr(line, &bg, &en, paramnum)) return 0;
+	if (param_getptr(line, &bg, &en, paramnum)) {	
+		return 0;
+	}
+
+	// Prevent out of bounds errors
+	if (en - bg + 1 >= buffersize) {
+		printf("out of bounds error: want %d bytes have %zd bytes\n", en - bg + 1 + 1, buffersize);
+		return 0;
+	}
 	
 	memcpy(str, line + bg, en - bg + 1);
 	str[en - bg + 1] = 0;
@@ -401,6 +619,7 @@ https://github.com/ApertureLabsLtd/RFIDler/blob/master/firmware/Pic32/RFIDler.X/
 int hextobinarray(char *target, char *source)
 {
     int length, i, count= 0;
+    char* start = source;
     char x;
 
     length = strlen(source);
@@ -416,25 +635,16 @@ int hextobinarray(char *target, char *source)
             x -= '0';
         else if (x >= 'A' && x <= 'F')
             x -= 'A' - 10;
-        else
+        else {
+        	printf("Discovered unknown character %c %d at idx %tu of %s\n", x, x, source - start, start);
             return 0;
+        }
         // output
         for(i= 0 ; i < 4 ; ++i, ++count)
             *(target++)= (x >> (3 - i)) & 1;
     }
     
     return count;
-}
-
-// convert hex to human readable binary string
-int hextobinstring(char *target, char *source)
-{
-    int length;
-
-    if(!(length= hextobinarray(target, source)))
-        return 0;
-    binarraytobinstring(target, target, length);
-    return length;
 }
 
 // convert binary array of 0x00/0x01 values to hex (safe to do in place as target will always be shorter than source)
@@ -459,16 +669,6 @@ int binarraytohex(char *target,char *source, int length)
     return length;
 }
 
-// convert binary array to human readable binary
-void binarraytobinstring(char *target, char *source,  int length)
-{
-    int i;
-
-    for(i= 0 ; i < length ; ++i)
-        *(target++)= *(source++) + '0';
-    *target= '\0';
-}
-
 // return parity bit required to match type
 uint8_t GetParity( uint8_t *bits, uint8_t type, int length)
 {
@@ -490,16 +690,10 @@ void wiegand_add_parity(uint8_t *target, uint8_t *source, uint8_t length)
     *(target)= GetParity(source + length / 2, ODD, length / 2);
 }
 
+// xor two arrays together for len items.  The dst array contains the new xored values.
 void xor(unsigned char *dst, unsigned char *src, size_t len) {
    for( ; len > 0; len--,dst++,src++)
        *dst ^= *src;
-}
-
-int32_t le24toh (uint8_t data[3]) {
-    return (data[2] << 16) | (data[1] << 8) | data[0];
-}
-uint32_t le32toh (uint8_t *data) {
-	return (uint32_t)( (data[3]<<24) | (data[2]<<16) | (data[1]<<8) | data[0]);
 }
 
 // RotateLeft - Ultralight, Desfire, works on byte level
@@ -511,3 +705,53 @@ void rol(uint8_t *data, const size_t len){
     }
     data[len-1] = first;
 }
+
+
+// Replace unprintable characters with a dot in char buffer
+void clean_ascii(unsigned char *buf, size_t len) {
+  for (size_t i = 0; i < len; i++) {
+    if (!isprint(buf[i]))
+      buf[i] = '.';
+  }
+}
+
+// replace \r \n to \0
+void strcleanrn(char *buf, size_t len) {
+	strcreplace(buf, len, '\n', '\0');
+	strcreplace(buf, len, '\r', '\0');
+}
+
+// replace char in buffer
+void strcreplace(char *buf, size_t len, char from, char to) {
+  for (size_t i = 0; i < len; i++) {
+    if (buf[i] == from)
+      buf[i] = to;
+  }
+}
+
+char *strmcopy(char *buf) {
+	char * str = NULL;
+	if ((str = (char*) malloc(strlen(buf) + 1)) != NULL) {
+		memset(str, 0, strlen(buf) + 1);
+		strcpy(str, buf);
+	}	
+	return str;
+}
+
+
+// determine number of logical CPU cores (use for multithreaded functions)
+extern int num_CPUs(void)
+{
+#if defined(_WIN32)
+	#include <sysinfoapi.h>
+	SYSTEM_INFO sysinfo;
+	GetSystemInfo(&sysinfo);
+	return sysinfo.dwNumberOfProcessors;
+#elif defined(__linux__) || defined(__APPLE__)
+	#include <unistd.h>
+	return sysconf(_SC_NPROCESSORS_ONLN);
+#else
+	return 1;
+#endif
+}
+

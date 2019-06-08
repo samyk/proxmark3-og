@@ -10,17 +10,24 @@ APP_INCLUDES = apps.h
 
 #remove one of the following defines and comment out the relevant line
 #in the next section to remove that particular feature from compilation
-APP_CFLAGS	= -DWITH_ISO14443a_StandAlone -DWITH_LF -DWITH_ISO15693 -DWITH_ISO14443a -DWITH_ISO14443b -DWITH_ICLASS -DWITH_LEGICRF -DWITH_HITAG  -DWITH_CRC -DON_DEVICE -DWITH_HFSNOOP \
-				-fno-strict-aliasing -ffunction-sections -fdata-sections
-#-DWITH_LCD
+APP_CFLAGS  = -DON_DEVICE \
+        -fno-strict-aliasing -ffunction-sections -fdata-sections
 
-#SRC_LCD = fonts.c LCD.c
+include ../common/Makefile_Enabled_Options.common
+
+ifneq (,$(findstring WITH_LCD,$(APP_CFLAGS)))
+        SRC_LCD = fonts.c LCD.c
+else
+        SRC_LCD = 
+endif
 SRC_LF = lfops.c hitag2.c hitagS.c lfsampling.c pcf7931.c lfdemod.c protocols.c
 SRC_ISO15693 = iso15693.c iso15693tools.c
-SRC_ISO14443a = epa.c iso14443a.c mifareutil.c mifarecmd.c mifaresniff.c
+SRC_ISO14443a = epa.c iso14443a.c mifareutil.c mifarecmd.c mifaresniff.c mifaresim.c
 SRC_ISO14443b = iso14443b.c
-SRC_CRAPTO1 = crapto1.c crypto1.c des.c aes.c
-SRC_CRC = iso14443crc.c crc.c crc16.c crc32.c
+SRC_CRAPTO1 = crypto1.c 
+SRC_DES = platform_util_arm.c des.c
+SRC_CRC = iso14443crc.c crc.c crc16.c crc32.c parity.c
+SRC_SMARTCARD = i2c.c
 
 #the FPGA bitstream files. Note: order matters!
 FPGA_BITSTREAMS = fpga_lf.bit fpga_hf.bit
@@ -33,15 +40,13 @@ APP_CFLAGS += $(ZLIB_CFLAGS)
 # zlib includes:
 APP_CFLAGS += -I../zlib
 
-# stdint.h provided locally until GCC 4.5 becomes C99 compliant
-APP_CFLAGS += -I.
-
 # Compile these in thumb mode (small size)
 THUMBSRC = start.c \
 	$(SRC_LCD) \
 	$(SRC_ISO15693) \
 	$(SRC_LF) \
 	$(SRC_ZLIB) \
+	$(SRC_SMARTCARD) \
 	appmain.c \
 	printf.c \
 	util.c \
@@ -52,15 +57,20 @@ THUMBSRC = start.c \
 # These are to be compiled in ARM mode
 ARMSRC = fpgaloader.c \
 	legicrf.c \
+	legicrfsim.c \
+	legic_prng.c \
 	$(SRC_ISO14443a) \
 	$(SRC_ISO14443b) \
 	$(SRC_CRAPTO1) \
+	$(SRC_DES) \
 	$(SRC_CRC) \
-	legic_prng.c \
 	iclass.c \
 	BigBuf.c \
 	optimized_cipher.c \
 	hfsnoop.c
+
+VERSIONSRC = version.c \
+	fpga_version_info.c
 
 # Do not move this inclusion before the definition of {THUMB,ASM,ARM}SRC
 include ../common/Makefile.common
@@ -71,6 +81,14 @@ FPGA_COMPRESSOR = ../client/fpga_compress
 all: $(OBJS)
 
 .DELETE_ON_ERROR:
+
+# version.c should be remade on every compilation
+.PHONY: version.c
+version.c: default_version.c
+	perl ../tools/mkversion.pl .. > $@ || $(COPY) $^ $@ 
+
+fpga_version_info.c: $(FPGA_BITSTREAMS) $(FPGA_COMPRESSOR)
+	$(FPGA_COMPRESSOR) -v $(filter %.bit,$^) $@
 
 $(OBJDIR)/fpga_all.o: $(OBJDIR)/fpga_all.bit.z
 	$(OBJCOPY) -O elf32-littlearm -I binary -B arm --prefix-sections=fpga_all_bit $^ $@
@@ -100,7 +118,7 @@ $(OBJDIR)/fullimage.data.o: $(OBJDIR)/fullimage.data.bin.z
 	$(OBJCOPY) -O elf32-littlearm -I binary -B arm --rename-section .data=compressed_data $^ $@
 
 $(OBJDIR)/fullimage.elf: $(OBJDIR)/fullimage.nodata.o $(OBJDIR)/fullimage.data.o
-	$(CC) $(LDFLAGS) -Wl,-T,ldscript,-Map,$(patsubst %.elf,%.map,$@) -o $@ $^
+	$(CC) $(LDFLAGS) -Wl,-T,ldscript,-e,_osimage_entry,-Map,$(patsubst %.elf,%.map,$@) -o $@ $^
 
 tarbin: $(OBJS)
 	$(TAR) $(TARFLAGS) ../proxmark3-$(platform)-bin.tar $(OBJS:%=armsrc/%) $(OBJS:%.s19=armsrc/%.elf)

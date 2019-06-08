@@ -22,180 +22,69 @@
 // the client. Signal Processing & decoding is done on the pc. This is the slowest
 // variant, but offers the possibility to analyze the waveforms directly. 
 
+#include "cmdhf15.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 
-#include "proxmark3.h"
-#include "data.h"
+#include "comms.h"
 #include "graph.h"
 #include "ui.h"
 #include "util.h"
 #include "cmdparser.h"
-#include "cmdhf15.h"
 #include "iso15693tools.h"
+#include "protocols.h"
 #include "cmdmain.h"
-
-#define FrameSOF              Iso15693FrameSOF
-#define Logic0						Iso15693Logic0
-#define Logic1						Iso15693Logic1
-#define FrameEOF					Iso15693FrameEOF
+#include "taginfo.h"
 
 #define Crc(data,datalen)     Iso15693Crc(data,datalen)
 #define AddCrc(data,datalen)  Iso15693AddCrc(data,datalen)
 #define sprintUID(target,uid)	Iso15693sprintUID(target,uid)
 
-// structure and database for uid -> tagtype lookups 
-typedef struct { 
-	uint64_t uid;
-	int mask; // how many MSB bits used
-	char* desc;
-} productName; 
+// SOF defined as
+// 1) Unmodulated time of 56.64us
+// 2) 24 pulses of 423.75khz
+// 3) logic '1' (unmodulated for 18.88us followed by 8 pulses of 423.75khz)
 
+static const int Iso15693FrameSOF[] = {
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	 1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+	 1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+	-1, -1, -1, -1,
+	-1, -1, -1, -1,
+	 1,  1,  1,  1,
+	 1,  1,  1,  1
+};
+static const int Iso15693Logic0[] = {
+	 1,  1,  1,  1,
+	 1,  1,  1,  1,
+	-1, -1, -1, -1,
+	-1, -1, -1, -1
+};
+static const int Iso15693Logic1[] = {
+	-1, -1, -1, -1,
+	-1, -1, -1, -1,
+	 1,  1,  1,  1,
+	 1,  1,  1,  1
+};
 
-const productName uidmapping[] = {
+// EOF defined as
+// 1) logic '0' (8 pulses of 423.75khz followed by unmodulated for 18.88us)
+// 2) 24 pulses of 423.75khz
+// 3) Unmodulated time of 56.64us
 
-	// UID, #significant Bits, "Vendor(+Product)"
-	{ 0xE001000000000000LL, 16, "Motorola UK" },
-	
-	// E0 02 xx
-	//   02 = ST Microelectronics
-	//   XX = IC id (Chip ID Family)
-	{ 0xE002000000000000LL, 16, "ST Microelectronics SA France" },
-	{ 0xE002050000000000LL, 24, "ST Microelectronics; LRI64   [IC id = 05]"},
-	{ 0xE002080000000000LL, 24, "ST Microelectronics; LRI2K   [IC id = 08]"},
-	{ 0xE0020A0000000000LL, 24, "ST Microelectronics; LRIS2K  [IC id = 10]"},
-	{ 0xE002440000000000LL, 24, "ST Microelectronics; LRIS64K [IC id = 68]"},
-
-	{ 0xE003000000000000LL, 16, "Hitachi, Ltd Japan" }, 
-	
-	// E0 04 xx
-	//   04 = Manufacturer code (Philips/NXP)
-	//   XX = IC id (Chip ID Family)
-	//I-Code SLI SL2 ICS20 [IC id = 01]
-	//I-Code SLI-S         [IC id = 02]
-	//I-Code SLI-L         [IC id = 03]
-	//I-Code SLIX          [IC id = 01 + bit36 set to 1 (starting from bit0 - different from normal SLI)]
-	//I-Code SLIX-S        [IC id = 02 + bit36 set to 1]
-	//I-Code SLIX-L        [IC id = 03 + bit36 set to 1]
-	{ 0xE004000000000000LL, 16, "NXP Semiconductors Germany (Philips)" }, 
-	{ 0xE004010000000000LL, 24, "NXP(Philips); IC SL2 ICS20/ICS21(SLI) ICS2002/ICS2102(SLIX)" },
-	{ 0xE004020000000000LL, 24, "NXP(Philips); IC SL2 ICS53/ICS54(SLI-S) ICS5302/ICS5402(SLIX-S)" },
-	{ 0xE004030000000000LL, 24, "NXP(Philips); IC SL2 ICS50/ICS51(SLI-L) ICS5002/ICS5102(SLIX-L)" },
-
-	// E0 05 XX .. .. ..
-	//   05 = Manufacturer code (Infineon)
-	//   XX = IC id (Chip ID Family)
-	{ 0xE005000000000000LL, 16, "Infineon Technologies AG Germany" }, 
-	{ 0xE005A10000000000LL, 24, "Infineon; SRF55V01P [IC id = 161] plain mode 1kBit"},
-	{ 0xE005A80000000000LL, 24, "Infineon; SRF55V01P [IC id = 168] pilot series 1kBit"},
-	{ 0xE005400000000000LL, 24, "Infineon; SRF55V02P [IC id = 64]  plain mode 2kBit"},
-	{ 0xE005000000000000LL, 24, "Infineon; SRF55V10P [IC id = 00]  plain mode 10KBit"},
-	{ 0xE005500000000000LL, 24, "Infineon; SRF55V02S [IC id = 80]  secure mode 2kBit"},
-	{ 0xE005100000000000LL, 24, "Infineon; SRF55V10S [IC id = 16]  secure mode 10KBit"},
-	{ 0xE0051E0000000000LL, 23, "Infineon; SLE66r01P [IC id = 3x = My-d Move or My-d move NFC]"},
-	{ 0xE005200000000000LL, 21, "Infineon; SLE66r01P [IC id = 3x = My-d Move or My-d move NFC]"},
-	
-	{ 0xE006000000000000LL, 16, "Cylink USA" }, 
-	
-	
-	// E0 07 xx
-	//   07 = Texas Instruments
-	//   XX = from bit 41 to bit 43 = product configuration - from bit 44 to bit 47 IC id (Chip ID Family)
-	//Tag IT RFIDType-I Plus, 2kBit, TI Inlay
-	//Tag-it HF-I Plus Inlay             [IC id = 00] -> b'0000 000 2kBit
-	//Tag-it HF-I Plus Chip              [IC id = 64] -> b'1000 000 2kBit
-	//Tag-it HF-I Standard Chip / Inlays [IC id = 96] -> b'1100 000 256Bit
-	//Tag-it HF-I Pro Chip / Inlays      [IC id = 98] -> b'1100 010 256Bit, Password protection
-	{ 0xE007000000000000LL, 16, "Texas Instrument France" },
-	{ 0xE007000000000000LL, 20, "Texas Instrument; Tag-it HF-I Plus Inlay; 64x32bit" },
-	{ 0xE007100000000000LL, 20, "Texas Instrument; Tag-it HF-I Plus Chip; 64x32bit" },
-	{ 0xE007800000000000LL, 23, "Texas Instrument; Tag-it HF-I Plus (RF-HDT-DVBB tag or Third Party Products)" },
-	{ 0xE007C00000000000LL, 23, "Texas Instrument; Tag-it HF-I Standard; 8x32bit" },
-	{ 0xE007C40000000000LL, 23, "Texas Instrument; Tag-it HF-I Pro; 8x23bit; password" },	
-
-	{ 0xE008000000000000LL, 16, "Fujitsu Limited Japan" }, 
-	{ 0xE009000000000000LL, 16, "Matsushita Electronics Corporation, Semiconductor Company Japan" }, 
-	{ 0xE00A000000000000LL, 16, "NEC Japan" }, 
-	{ 0xE00B000000000000LL, 16, "Oki Electric Industry Co. Ltd Japan" },
-	{ 0xE00C000000000000LL, 16, "Toshiba Corp. Japan" },
-	{ 0xE00D000000000000LL, 16, "Mitsubishi Electric Corp. Japan" },
-	{ 0xE00E000000000000LL, 16, "Samsung Electronics Co. Ltd Korea" },
-	{ 0xE00F000000000000LL, 16, "Hynix / Hyundai, Korea" },
-	{ 0xE010000000000000LL, 16, "LG-Semiconductors Co. Ltd Korea" },
-	{ 0xE011000000000000LL, 16, "Emosyn-EM Microelectronics USA" },
-
-	{ 0xE012000000000000LL, 16, "HID Corporation" },
-	{ 0xE012000000000000LL, 16, "INSIDE Technology France" },
-	{ 0xE013000000000000LL, 16, "ORGA Kartensysteme GmbH Germany" },
-	{ 0xE014000000000000LL, 16, "SHARP Corporation Japan" },
-	{ 0xE015000000000000LL, 16, "ATMEL France" },
-	
-	{ 0xE016000000000000LL, 16, "EM Microelectronic-Marin SA Switzerland (Skidata)"},
-	{ 0xE016040000000000LL, 24, "EM-Marin SA (Skidata Keycard-eco); EM4034 [IC id = 01] (Read/Write - no AFI)"},
-	{ 0xE0160C0000000000LL, 24, "EM-Marin SA (Skidata); EM4035 [IC id = 03] (Read/Write - replaced by 4233)"},
-	{ 0xE016100000000000LL, 24, "EM-Marin SA (Skidata); EM4135 [IC id = 04] (Read/Write - replaced by 4233) 36x64bit start page 13"},
-	{ 0xE016140000000000LL, 24, "EM-Marin SA (Skidata); EM4036 [IC id = 05] 28pF"},
-	{ 0xE016180000000000LL, 24, "EM-Marin SA (Skidata); EM4006 [IC id = 06] (Read Only)"}, 
-	{ 0xE0161C0000000000LL, 24, "EM-Marin SA (Skidata); EM4133 [IC id = 07] 23,5pF (Read/Write)"},
-	{ 0xE016200000000000LL, 24, "EM-Marin SA (Skidata); EM4033 [IC id = 08] 23,5pF (Read Only - no AFI / no DSFID / no security blocks)"},
-	{ 0xE016240000000000LL, 24, "EM-Marin SA (Skidata); EM4233 [IC id = 09] 23,5pF CustomerID-102"},
-	{ 0xE016280000000000LL, 24, "EM-Marin SA (Skidata); EM4233 SLIC [IC id = 10] 23,5pF (1Kb flash memory - not provide High Security mode and QuietStorage feature)" },
-	{ 0xE0163C0000000000LL, 24, "EM-Marin SA (Skidata); EM4237 [IC id = 15] 23,5pF"},
-	{ 0xE0167C0000000000LL, 24, "EM-Marin SA (Skidata); EM4233 [IC id = 31] 95pF"},
-	{ 0xE016940000000000LL, 24, "EM-Marin SA (Skidata); EM4036 [IC id = 37] 95pF  51x64bit "},
-	{ 0xE0169c0000000000LL, 24, "EM-Marin SA (Skidata); EM4133 [IC id = 39] 95pF (Read/Write)" },
-	{ 0xE016A80000000000LL, 24, "EM-Marin SA (Skidata); EM4233 SLIC [IC id = 42] 97pF" },
-	{ 0xE016BC0000000000LL, 24, "EM-Marin SA (Skidata); EM4237 [IC id = 47] 97pF" },
-
-	{ 0xE017000000000000LL, 16, "KSW Microtec GmbH Germany" },
-	{ 0xE018000000000000LL, 16, "ZMD AG Germany" },
-	{ 0xE019000000000000LL, 16, "XICOR, Inc. USA" },
-	{ 0xE01A000000000000LL, 16, "Sony Corporation Japan Identifier Company Country" },
-	{ 0xE01B000000000000LL, 16, "Malaysia Microelectronic Solutions Sdn. Bhd Malaysia" },
-	{ 0xE01C000000000000LL, 16, "Emosyn USA" },
-	{ 0xE01D000000000000LL, 16, "Shanghai Fudan Microelectronics Co. Ltd. P.R. China" },
-	{ 0xE01E000000000000LL, 16, "Magellan Technology Pty Limited Australia" },
-	{ 0xE01F000000000000LL, 16, "Melexis NV BO Switzerland" },
-	{ 0xE020000000000000LL, 16, "Renesas Technology Corp. Japan" },
-	{ 0xE021000000000000LL, 16, "TAGSYS France" },
-	{ 0xE022000000000000LL, 16, "Transcore USA" },
-	{ 0xE023000000000000LL, 16, "Shanghai belling corp., ltd. China" },
-	{ 0xE024000000000000LL, 16, "Masktech Germany Gmbh Germany" },
-	{ 0xE025000000000000LL, 16, "Innovision Research and Technology Plc UK" },
-	{ 0xE026000000000000LL, 16, "Hitachi ULSI Systems Co., Ltd. Japan" },
-	{ 0xE027000000000000LL, 16, "Cypak AB Sweden" },
-	{ 0xE028000000000000LL, 16, "Ricoh Japan" },
-	{ 0xE029000000000000LL, 16, "ASK France" },
-	{ 0xE02A000000000000LL, 16, "Unicore Microsystems, LLC Russian Federation" },
-	{ 0xE02B000000000000LL, 16, "Dallas Semiconductor/Maxim USA" },
-	{ 0xE02C000000000000LL, 16, "Impinj, Inc. USA" },
-	{ 0xE02D000000000000LL, 16, "RightPlug Alliance USA" },
-	{ 0xE02E000000000000LL, 16, "Broadcom Corporation USA" },
-	{ 0xE02F000000000000LL, 16, "MStar Semiconductor, Inc Taiwan, ROC" },
-	{ 0xE030000000000000LL, 16, "BeeDar Technology Inc. USA" },
-	{ 0xE031000000000000LL, 16, " RFIDsec Denmark" },
-	{ 0xE032000000000000LL, 16, " Schweizer Electronic AG Germany" },
-	{ 0xE033000000000000LL, 16, " AMIC Technology Corp Taiwan" }, 
-	{ 0xE034000000000000LL, 16, "Mikron JSC Russia" },
-	{ 0xE035000000000000LL, 16, "Fraunhofer Institute for Photonic Microsystems Germany" },
-	{ 0xE036000000000000LL, 16, "IDS Microchip AG Switzerland" },
-	{ 0xE037000000000000LL, 16, "Kovio USA" },
-	{ 0xE038000000000000LL, 16, "HMT Microelectronic Ltd Switzerland Identifier Company Country" },
-	{ 0xE039000000000000LL, 16, "Silicon Craft Technology Thailand" },
-	{ 0xE03A000000000000LL, 16, "Advanced Film Device Inc. Japan" },
-	{ 0xE03B000000000000LL, 16, "Nitecrest Ltd UK" },
-	{ 0xE03C000000000000LL, 16, "Verayo Inc. USA" },
-	{ 0xE03D000000000000LL, 16, "HID Global USA" },
-	{ 0xE03E000000000000LL, 16, "Productivity Engineering Gmbh Germany" },
-	{ 0xE03F000000000000LL, 16, "Austriamicrosystems AG (reserved) Austria" }, 
-	{ 0xE040000000000000LL, 16, "Gemalto SA France" },
-	{ 0xE041000000000000LL, 16, "Renesas Electronics Corporation Japan" },
-	{ 0xE042000000000000LL, 16, "3Alogics Inc Korea" },
-	{ 0xE043000000000000LL, 16, "Top TroniQ Asia Limited Hong Kong" },
-	{ 0xE044000000000000LL, 16, "Gentag Inc (USA) USA" },
-	{ 0,0,"no tag-info available" } // must be the last entry
+static const int Iso15693FrameEOF[] = {
+	 1,  1,  1,  1,
+	 1,  1,  1,  1,
+	-1, -1, -1, -1,
+	-1, -1, -1, -1,
+	 1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+	 1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1
 };
 
 
@@ -212,52 +101,23 @@ int getUID(uint8_t *buf)
 	
 	for (int retry=0;retry<3; retry++) { // don't give up the at the first try		
 		
-		req[0]= ISO15_REQ_SUBCARRIER_SINGLE | ISO15_REQ_DATARATE_HIGH | 
-		        ISO15_REQ_INVENTORY | ISO15_REQINV_SLOT1;
-		req[1]=ISO15_CMD_INVENTORY;
-		req[2]=0; // mask length
-		reqlen=AddCrc(req,3);
-		c.arg[0]=reqlen;
+		req[0] = ISO15693_REQ_DATARATE_HIGH | ISO15693_REQ_INVENTORY | ISO15693_REQINV_SLOT1;
+		req[1] = ISO15693_INVENTORY;
+		req[2] = 0; // mask length
+		reqlen = AddCrc(req,3);
+		c.arg[0] = reqlen;
 	
 		SendCommand(&c);
 		
 		if (WaitForResponseTimeout(CMD_ACK,&resp,1000)) {
 			recv = resp.d.asBytes;
-			if (resp.arg[0]>=12 && ISO15_CRC_CHECK==Crc(recv,12)) {
+			if (resp.arg[0]>=12 && ISO15693_CRC_CHECK==Crc(recv,12)) {
 			   memcpy(buf,&recv[2],8);
 			   return 1;
 			} 
 		} 
 	} // retry
 	return 0;
-}
-
-
-
-// get a product description based on the UID
-//		uid[8] 	tag uid
-// returns description of the best match	
-static char* getTagInfo(uint8_t *uid) {
-	uint64_t myuid,mask;
-	int i=0, best=-1;	
-	memcpy(&myuid,uid,sizeof(uint64_t));
-	while (uidmapping[i].mask>0) {
-		mask=(~0LL) <<(64-uidmapping[i].mask);
-		if ((myuid & mask) == uidmapping[i].uid) {
-			if (best==-1) { 
-				best=i;
-			} else {
-				if (uidmapping[i].mask>uidmapping[best].mask) {
-					best=i;
-				}
-			}					
-		} 
-		i++;
-	} 
-
-	if (best>=0) return uidmapping[best].desc;
-	
-	return uidmapping[i].desc; 
 }
 
 
@@ -268,7 +128,7 @@ static char* TagErrorStr(uint8_t error) {
 		case 0x02: return "The command is not recognised";
 		case 0x03: return "The option is not supported.";
 		case 0x0f: return "Unknown error.";
-		case 0x10: return "The specified block is not available (doesn’t exist).";
+		case 0x10: return "The specified block is not available (doesn't exist).";
 		case 0x11: return "The specified block is already -locked and thus cannot be locked again";
 		case 0x12: return "The specified block is locked and its content cannot be changed.";
 		case 0x13: return "The specified block was not successfully programmed.";
@@ -286,15 +146,15 @@ int CmdHF15Demod(const char *Cmd)
 	int i, j;
 	int max = 0, maxPos = 0;
 
-	int skip = 4;
+	int skip = 2;
 
-	if (GraphTraceLen < 1000) return 0;
+	if (GraphTraceLen < 2000) return 0;
 
 	// First, correlate for SOF
-	for (i = 0; i < 100; i++) {
+	for (i = 0; i < 200; i++) {
 		int corr = 0;
-		for (j = 0; j < arraylen(FrameSOF); j += skip) {
-			corr += FrameSOF[j] * GraphBuffer[i + (j / skip)];
+		for (j = 0; j < arraylen(Iso15693FrameSOF); j += skip) {
+			corr += Iso15693FrameSOF[j] * GraphBuffer[i + (j / skip)];
 		}
 		if (corr > max) {
 			max = corr;
@@ -302,43 +162,50 @@ int CmdHF15Demod(const char *Cmd)
 		}
 	}
 	PrintAndLog("SOF at %d, correlation %d", maxPos,
-		max / (arraylen(FrameSOF) / skip));
+		max / (arraylen(Iso15693FrameSOF) / skip));
 	
-	i = maxPos + arraylen(FrameSOF) / skip;
+	i = maxPos + arraylen(Iso15693FrameSOF) / skip;
 	int k = 0;
 	uint8_t outBuf[20];
 	memset(outBuf, 0, sizeof(outBuf));
 	uint8_t mask = 0x01;
 	for (;;) {
-		int corr0 = 0, corr1 = 0, corrEOF = 0;
-		for (j = 0; j < arraylen(Logic0); j += skip) {
-			corr0 += Logic0[j] * GraphBuffer[i + (j / skip)];
-		}
-		for (j = 0; j < arraylen(Logic1); j += skip) {
-			corr1 += Logic1[j] * GraphBuffer[i + (j / skip)];
-		}
-		for (j = 0; j < arraylen(FrameEOF); j += skip) {
-			corrEOF += FrameEOF[j] * GraphBuffer[i + (j / skip)];
-		}
-		// Even things out by the length of the target waveform.
-		corr0 *= 4;
-		corr1 *= 4;
-		
-		if (corrEOF > corr1 && corrEOF > corr0) {
-			PrintAndLog("EOF at %d", i);
-			break;
+			int corr0 = 0, corr00 = 0, corr01 = 0, corr1 = 0, corrEOF = 0;
+			for(j = 0; j < arraylen(Iso15693Logic0); j += skip) {
+				corr0 += Iso15693Logic0[j]*GraphBuffer[i+(j/skip)];
+			}
+			corr01 = corr00 = corr0;
+			for(j = 0; j < arraylen(Iso15693Logic0); j += skip) {
+				corr00 += Iso15693Logic0[j]*GraphBuffer[i+arraylen(Iso15693Logic0)/skip+(j/skip)];
+				corr01 += Iso15693Logic1[j]*GraphBuffer[i+arraylen(Iso15693Logic0)/skip+(j/skip)];
+			}
+			for(j = 0; j < arraylen(Iso15693Logic1); j += skip) {
+				corr1 += Iso15693Logic1[j]*GraphBuffer[i+(j/skip)];
+			}
+			for(j = 0; j < arraylen(Iso15693FrameEOF); j += skip) {
+				corrEOF += Iso15693FrameEOF[j]*GraphBuffer[i+(j/skip)];
+			}
+			// Even things out by the length of the target waveform.
+			corr00 *= 2;
+			corr01 *= 2;
+			corr0 *= 4;
+			corr1 *= 4;
+	
+			if(corrEOF > corr1 && corrEOF > corr00 && corrEOF > corr01) {
+				PrintAndLog("EOF at %d", i);
+				break;
 		} else if (corr1 > corr0) {
-			i += arraylen(Logic1) / skip;
+			i += arraylen(Iso15693Logic1) / skip;
 			outBuf[k] |= mask;
 		} else {
-			i += arraylen(Logic0) / skip;
+			i += arraylen(Iso15693Logic0) / skip;
 		}
 		mask <<= 1;
 		if (mask == 0) {
 			k++;
 			mask = 0x01;
 		}
-		if ((i + (int)arraylen(FrameEOF)) >= GraphTraceLen) {
+		if ((i + (int)arraylen(Iso15693FrameEOF)) >= GraphTraceLen) {
 			PrintAndLog("ran off end!");
 			break;
 		}
@@ -366,10 +233,10 @@ int CmdHF15Read(const char *Cmd)
 	return 0;
 }
 
-// Record Activity without enabeling carrier
-int CmdHF15Record(const char *Cmd)
+// Record Activity without enabling carrier
+int CmdHF15Snoop(const char *Cmd)
 {
-	UsbCommand c = {CMD_RECORD_RAW_ADC_SAMPLES_ISO_15693};
+	UsbCommand c = {CMD_SNOOP_ISO_15693};
 	SendCommand(&c);
 	return 0;
 }
@@ -383,8 +250,9 @@ int HF15Reader(const char *Cmd, bool verbose)
 		return 0;
 	}
 
-	PrintAndLog("Tag UID : %s",sprintUID(NULL,uid));
-	PrintAndLog("Tag Info: %s",getTagInfo(uid));
+	PrintAndLog("UID:               %s", sprintUID(NULL,uid));
+	PrintAndLog("Manufacturer byte: %02X, %s", uid[6], getManufacturerName(uid[6]));
+	PrintAndLog("Chip ID:           %02X, %s", uid[5], getChipInfo(uid[6], uid[5]));
 	return 1;
 }
 
@@ -416,6 +284,7 @@ int CmdHF15Sim(const char *Cmd)
 	
 	PrintAndLog("Starting simulating UID %02X %02X %02X %02X %02X %02X %02X %02X",
 			uid[0],uid[1],uid[2],uid[3],uid[4], uid[5], uid[6], uid[7]);
+	PrintAndLog("Press the button to stop simulation");
 
 	UsbCommand c = {CMD_SIMTAG_ISO_15693, {0, 0, 0}};
 	memcpy(c.d.asBytes,uid,8);
@@ -449,25 +318,26 @@ int CmdHF15DumpMem(const char*Cmd) {
 		return 0;
 	}
 	
-	PrintAndLog("Reading memory from tag UID=%s",sprintUID(NULL,uid));
-	PrintAndLog("Tag Info: %s",getTagInfo(uid));
+	PrintAndLog("Reading memory from tag");
+	PrintAndLog("UID:               %s", sprintUID(NULL,uid));
+	PrintAndLog("Manufacturer byte: %02X, %s", uid[6], getManufacturerName(uid[6]));
+	PrintAndLog("Chip ID:           %02X, %s", uid[5], getChipInfo(uid[6], uid[5]));
 
 	for (int retry=0; retry<5; retry++) {
 		
-		req[0]= ISO15_REQ_SUBCARRIER_SINGLE | ISO15_REQ_DATARATE_HIGH | 
-		        ISO15_REQ_NONINVENTORY | ISO15_REQ_ADDRESS;
-		req[1]=ISO15_CMD_READ;
+		req[0]= ISO15693_REQ_DATARATE_HIGH | ISO15693_REQ_ADDRESS;
+		req[1] = ISO15693_READBLOCK;
 		memcpy(&req[2],uid,8);
-		req[10]=blocknum;
-		reqlen=AddCrc(req,11);
-		c.arg[0]=reqlen;
+		req[10] = blocknum;
+		reqlen = AddCrc(req,11);
+		c.arg[0] = reqlen;
 	
 		SendCommand(&c);
 		
 		if (WaitForResponseTimeout(CMD_ACK,&resp,1000)) {
 			recv = resp.d.asBytes;
-			if (ISO15_CRC_CHECK==Crc(recv,resp.arg[0])) {
-				if (!(recv[0] & ISO15_RES_ERROR)) {
+			if (ISO15693_CRC_CHECK==Crc(recv,resp.arg[0])) {
+				if (!(recv[0] & ISO15693_RES_ERROR)) {
 					retry=0;
 					*output=0; // reset outputstring
 					sprintf(output, "Block %02x   ",blocknum);
@@ -491,7 +361,7 @@ int CmdHF15DumpMem(const char*Cmd) {
   // TODO: need fix
 //	if (resp.arg[0]<3)
 //		PrintAndLog("Lost Connection");
-//	else if (ISO15_CRC_CHECK!=Crc(resp.d.asBytes,resp.arg[0]))
+//	else if (ISO15693_CRC_CHECK!=Crc(resp.d.asBytes,resp.arg[0]))
 //		PrintAndLog("CRC Failed");
 //	else 
 //		PrintAndLog("Tag returned Error %i: %s",recv[1],TagErrorStr(recv[1])); 
@@ -506,13 +376,13 @@ static command_t CommandTable15[] =
 	{"help",    CmdHF15Help,    1, "This help"},
 	{"demod",   CmdHF15Demod,   1, "Demodulate ISO15693 from tag"},
 	{"read",    CmdHF15Read,    0, "Read HF tag (ISO 15693)"},
-	{"record",  CmdHF15Record,  0, "Record Samples (ISO 15693)"}, // atrox
+	{"snoop",   CmdHF15Snoop,   0, "Eavesdrop ISO 15693 communications"},
 	{"reader",  CmdHF15Reader,  0, "Act like an ISO15693 reader"},
 	{"sim",     CmdHF15Sim,     0, "Fake an ISO15693 tag"},
 	{"cmd",     CmdHF15Cmd,     0, "Send direct commands to ISO15693 tag"},
 	{"findafi", CmdHF15Afi,     0, "Brute force AFI of an ISO15693 tag"},
 	{"dumpmemory", CmdHF15DumpMem,     0, "Read all memory pages of an ISO15693 tag"},
-		{NULL, NULL, 0, NULL}
+	{NULL, NULL, 0, NULL}
 };
 
 int CmdHF15(const char *Cmd)
@@ -539,20 +409,20 @@ int CmdHF15CmdInquiry(const char *Cmd)
 	uint8_t *req=c.d.asBytes;
 	int reqlen=0;
 	
-	req[0]= ISO15_REQ_SUBCARRIER_SINGLE | ISO15_REQ_DATARATE_HIGH | 
-	        ISO15_REQ_INVENTORY | ISO15_REQINV_SLOT1;
-	req[1]=ISO15_CMD_INVENTORY;
-	req[2]=0; // mask length
+	req[0] = ISO15693_REQ_DATARATE_HIGH | ISO15693_REQ_INVENTORY | ISO15693_REQINV_SLOT1;
+	req[1] = ISO15693_INVENTORY;
+	req[2] = 0; // mask length
 	reqlen=AddCrc(req,3);
-	c.arg[0]=reqlen;
+	c.arg[0] = reqlen;
 
 	SendCommand(&c);
 	
 	if (WaitForResponseTimeout(CMD_ACK,&resp,1000)) {
 		if (resp.arg[0]>=12) {
-		   recv = resp.d.asBytes;
-		   PrintAndLog("UID=%s",sprintUID(NULL,&recv[2]));
-		   PrintAndLog("Tag Info: %s",getTagInfo(&recv[2]));	
+			recv = resp.d.asBytes;
+			PrintAndLog("UID:               %s", sprintUID(NULL,recv+2));
+			PrintAndLog("Manufacturer byte: %02X, %s", recv[8], getManufacturerName(recv[8]));
+			PrintAndLog("Chip ID:           %02X, %s", recv[7], getChipInfo(recv[8], recv[7]));
 		} else {
 			PrintAndLog("Response to short, just %i bytes. No tag?\n",resp.arg[0]);
 		}
@@ -565,9 +435,9 @@ int CmdHF15CmdInquiry(const char *Cmd)
 
 // Turns debugging on(1)/off(0)
 int CmdHF15CmdDebug( const char *cmd) {
-	int debug=atoi(cmd);
-	if (strlen(cmd)<1) {
-		PrintAndLog("Usage: hf 15 cmd debug  <0|1>");
+	int debug = atoi(cmd);
+	if (strlen(cmd) < 1) {
+		PrintAndLog("Usage: hf 15 debug <0|1>");
 		PrintAndLog("	0 no debugging");
 		PrintAndLog("	1 turn debugging on");	
 		return 0;
@@ -698,7 +568,7 @@ int prepareHF15Cmd(char **cmd, UsbCommand *c, uint8_t iso15cmd[], int iso15cmdle
 	while (**cmd==' ' || **cmd=='\t') (*cmd)++;
 	
 	if (strstr(*cmd,"-o")==*cmd) {
-	 	req[reqlen]=ISO15_REQ_OPTION;
+	 	req[reqlen]=ISO15693_REQ_OPTION;
 	 	(*cmd)+=2;
 	}
 	
@@ -713,36 +583,32 @@ int prepareHF15Cmd(char **cmd, UsbCommand *c, uint8_t iso15cmd[], int iso15cmdle
 		case 's':
 		case 'S':
 			// you must have selected the tag earlier
-			req[reqlen++]|= ISO15_REQ_SUBCARRIER_SINGLE | ISO15_REQ_DATARATE_HIGH | 
-		       ISO15_REQ_NONINVENTORY | ISO15_REQ_SELECT;
-		   memcpy(&req[reqlen],&iso15cmd[0],iso15cmdlen);
-			reqlen+=iso15cmdlen;		   
+			req[reqlen++] |= ISO15693_REQ_DATARATE_HIGH | ISO15693_REQ_SELECT;
+			memcpy(&req[reqlen],&iso15cmd[0],iso15cmdlen);
+			reqlen += iso15cmdlen;		   
 		   break;
 		case 'u':
 		case 'U':
 			// unaddressed mode may not be supported by all vendors
-			req[reqlen++]|= ISO15_REQ_SUBCARRIER_SINGLE | ISO15_REQ_DATARATE_HIGH | 
-		       ISO15_REQ_NONINVENTORY;
-		   memcpy(&req[reqlen],&iso15cmd[0],iso15cmdlen);
-			reqlen+=iso15cmdlen;		   
+			req[reqlen++] |= ISO15693_REQ_DATARATE_HIGH;
+			memcpy(&req[reqlen],&iso15cmd[0],iso15cmdlen);
+			reqlen += iso15cmdlen;		   
 		   break;
 		case '*':
 			// we scan for the UID ourself
-			req[reqlen++]|= ISO15_REQ_SUBCARRIER_SINGLE | ISO15_REQ_DATARATE_HIGH | 
-		       ISO15_REQ_NONINVENTORY | ISO15_REQ_ADDRESS;
-		   memcpy(&req[reqlen],&iso15cmd[0],iso15cmdlen);
+			req[reqlen++] |= ISO15693_REQ_DATARATE_HIGH | ISO15693_REQ_ADDRESS;
+			memcpy(&req[reqlen],&iso15cmd[0],iso15cmdlen);
 			reqlen+=iso15cmdlen;		   
-		   if (!getUID(uid)) {
-		   	PrintAndLog("No Tag found");
-		   	return 0;
-		   }
-		   memcpy(req+reqlen,uid,8);
-		   PrintAndLog("Detected UID %s",sprintUID(NULL,uid));
-		   reqlen+=8;
+			if (!getUID(uid)) {
+				PrintAndLog("No Tag found");
+				return 0;
+			}
+			memcpy(req+reqlen,uid,8);
+			PrintAndLog("Detected UID %s",sprintUID(NULL,uid));
+			reqlen+=8;
 			break;			
 		default:
-			req[reqlen++]|= ISO15_REQ_SUBCARRIER_SINGLE | ISO15_REQ_DATARATE_HIGH | 
-		       ISO15_REQ_NONINVENTORY | ISO15_REQ_ADDRESS;
+			req[reqlen++] |= ISO15693_REQ_DATARATE_HIGH | ISO15693_REQ_ADDRESS;
 			memcpy(&req[reqlen],&iso15cmd[0],iso15cmdlen);
 			reqlen+=iso15cmdlen;		   
 		   
@@ -801,7 +667,7 @@ int CmdHF15CmdSysinfo(const char *Cmd) {
 		return 0;
 	}	
 	
-	prepareHF15Cmd(&cmd, &c,(uint8_t[]){ISO15_CMD_SYSINFO},1);	
+	prepareHF15Cmd(&cmd, &c,(uint8_t[]){ISO15693_GET_SYSTEM_INFO},1);	
 	reqlen=c.arg[0];
 	
 	reqlen=AddCrc(req,reqlen);
@@ -811,18 +677,12 @@ int CmdHF15CmdSysinfo(const char *Cmd) {
 
 	if (WaitForResponseTimeout(CMD_ACK,&resp,1000) && resp.arg[0]>2) {
 		recv = resp.d.asBytes;
-		if (ISO15_CRC_CHECK==Crc(recv,resp.arg[0])) {
-			if (!(recv[0] & ISO15_RES_ERROR)) {
+		if (ISO15693_CRC_CHECK==Crc(recv,resp.arg[0])) {
+			if (!(recv[0] & ISO15693_RES_ERROR)) {
 				*output=0; // reset outputstring
-				for ( i=1; i<resp.arg[0]-2; i++) {
-					sprintf(output+strlen(output),"%02X ",recv[i]);
-				}					
-				strcat(output,"\n\r");
-				strcat(output,"UID = ");
-				strcat(output,sprintUID(NULL,recv+2));
-				strcat(output,"\n\r");
-				strcat(output,getTagInfo(recv+2)); //ABC
-				strcat(output,"\n\r");
+				PrintAndLog("UID:               %s", sprintUID(NULL,recv+2));
+				PrintAndLog("Manufacturer byte: %02X, %s", recv[8], getManufacturerName(recv[8]));
+				PrintAndLog("Chip ID:           %02X, %s", recv[7], getChipInfo(recv[8], recv[7]));
 				i=10;
 				if (recv[1] & 0x01) 
 					sprintf(output+strlen(output),"DSFID supported, set to %02X\n\r",recv[i++]);
@@ -888,7 +748,7 @@ int CmdHF15CmdReadmulti(const char *Cmd) {
 		return 0;
 	}	
 	
-	prepareHF15Cmd(&cmd, &c,(uint8_t[]){ISO15_CMD_READMULTI},1);	
+	prepareHF15Cmd(&cmd, &c,(uint8_t[]){ISO15693_READ_MULTI_BLOCK},1);	
 	reqlen=c.arg[0];
 
 	pagenum=strtol(cmd,NULL,0);
@@ -912,8 +772,8 @@ int CmdHF15CmdReadmulti(const char *Cmd) {
 
 	if (WaitForResponseTimeout(CMD_ACK,&resp,1000) && resp.arg[0]>2) {
 		recv = resp.d.asBytes;
-		if (ISO15_CRC_CHECK==Crc(recv,resp.arg[0])) {
-			if (!(recv[0] & ISO15_RES_ERROR)) {
+		if (ISO15693_CRC_CHECK==Crc(recv,resp.arg[0])) {
+			if (!(recv[0] & ISO15693_RES_ERROR)) {
 				*output=0; // reset outputstring
 				for ( int i=1; i<resp.arg[0]-2; i++) {
 					sprintf(output+strlen(output),"%02X ",recv[i]);
@@ -966,7 +826,7 @@ int CmdHF15CmdRead(const char *Cmd) {
 		return 0;
 	}	
 	
-	prepareHF15Cmd(&cmd, &c,(uint8_t[]){ISO15_CMD_READ},1);	
+	prepareHF15Cmd(&cmd, &c,(uint8_t[]){ISO15693_READBLOCK},1);	
 	reqlen=c.arg[0];
 
 	pagenum=strtol(cmd,NULL,0);
@@ -985,8 +845,8 @@ int CmdHF15CmdRead(const char *Cmd) {
 
 	if (WaitForResponseTimeout(CMD_ACK,&resp,1000) && resp.arg[0]>2) {
 		recv = resp.d.asBytes;
-		if (ISO15_CRC_CHECK==Crc(recv,resp.arg[0])) {
-			if (!(recv[0] & ISO15_RES_ERROR)) {
+		if (ISO15693_CRC_CHECK==Crc(recv,resp.arg[0])) {
+			if (!(recv[0] & ISO15693_RES_ERROR)) {
 				*output=0; // reset outputstring
 				//sprintf(output, "Block %2i   ",blocknum);
 				for ( int i=1; i<resp.arg[0]-2; i++) {
@@ -1043,7 +903,7 @@ int CmdHF15CmdWrite(const char *Cmd) {
 		return 0;
 	}	
 	
-	prepareHF15Cmd(&cmd, &c,(uint8_t[]){ISO15_CMD_WRITE},1);	
+	prepareHF15Cmd(&cmd, &c,(uint8_t[]){ISO15693_WRITEBLOCK},1);	
 	reqlen=c.arg[0];
 	
 	// *cmd -> page num ; *cmd2 -> data 
@@ -1078,8 +938,8 @@ int CmdHF15CmdWrite(const char *Cmd) {
 
 	if (WaitForResponseTimeout(CMD_ACK,&resp,2000) && resp.arg[0]>2) {
 		recv = resp.d.asBytes;
-		if (ISO15_CRC_CHECK==Crc(recv,resp.arg[0])) {
-			if (!(recv[0] & ISO15_RES_ERROR)) {					
+		if (ISO15693_CRC_CHECK==Crc(recv,resp.arg[0])) {
+			if (!(recv[0] & ISO15693_RES_ERROR)) {					
 				PrintAndLog("OK");	
 			} else {
 				PrintAndLog("Tag returned Error %i: %s",recv[1],TagErrorStr(recv[1])); 

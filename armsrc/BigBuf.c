@@ -13,9 +13,18 @@
 #include "proxmark3.h"
 #include "apps.h"
 #include "string.h"
+#include "util.h"
 
 // BigBuf is the large multi-purpose buffer, typically used to hold A/D samples or traces.
 // Also used to hold various smaller buffers and the Mifare Emulator Memory.
+
+/* BigBuf memory layout:
+Pointer to highest available memory: BigBuf_hi
+
+	high BIGBUF_SIZE
+	reserved = BigBuf_malloc()  subtracts amount from BigBuf_hi,
+	low  0x00
+*/
 
 // declare it as uint32_t to achieve alignment to 4 Byte boundary
 static uint32_t BigBuf[BIGBUF_SIZE/sizeof(uint32_t)];
@@ -27,8 +36,9 @@ static uint16_t BigBuf_hi = BIGBUF_SIZE;
 static uint8_t *emulator_memory = NULL;
 
 // trace related variables
-static uint16_t traceLen = 0;
-int tracing = 1; //Last global one.. todo static?
+static uint32_t traceLen = 0;
+static bool tracing = true;
+
 
 // get the address of BigBuf
 uint8_t *BigBuf_get_addr(void)
@@ -40,10 +50,11 @@ uint8_t *BigBuf_get_addr(void)
 // get the address of the emulator memory. Allocate part of Bigbuf for it, if not yet done
 uint8_t *BigBuf_get_EM_addr(void)
 {
-	if (emulator_memory == NULL) {		// not yet allocated
+	// not yet allocated
+	if (emulator_memory == NULL) {
 		emulator_memory = BigBuf_malloc(CARD_MEMORY_SIZE);
 	}
-	
+
 	return emulator_memory;
 }
 
@@ -53,28 +64,36 @@ void BigBuf_Clear(void)
 {
 	BigBuf_Clear_ext(true);
 }
+
+
 // clear ALL of BigBuf
 void BigBuf_Clear_ext(bool verbose)
 {
-	memset(BigBuf,0,BIGBUF_SIZE);
-	if (verbose) 
-		Dbprintf("Buffer cleared (%i bytes)",BIGBUF_SIZE);
+	memset(BigBuf, 0, BIGBUF_SIZE);
+	if (verbose)
+		Dbprintf("Buffer cleared (%i bytes)", BIGBUF_SIZE);
 }
+
+
+void BigBuf_Clear_EM(void){
+	memset(BigBuf_get_EM_addr(), 0, CARD_MEMORY_SIZE);
+}
+
 
 void BigBuf_Clear_keep_EM(void)
 {
-	memset(BigBuf,0,BigBuf_hi);
+	memset(BigBuf, 0, BigBuf_hi);
 }
 
 // allocate a chunk of memory from BigBuf. We allocate high memory first. The unallocated memory
 // at the beginning of BigBuf is always for traces/samples
 uint8_t *BigBuf_malloc(uint16_t chunksize)
 {
-	if (BigBuf_hi - chunksize < 0) { 
-		return NULL;							// no memory left
+	if (BigBuf_hi - chunksize < 0) {
+		return NULL;                            // no memory left
 	} else {
-		chunksize = (chunksize + 3) & 0xfffc;	// round to next multiple of 4
-		BigBuf_hi -= chunksize; 		  		// aligned to 4 Byte boundary 
+		chunksize = (chunksize + 3) & 0xfffc;   // round to next multiple of 4
+		BigBuf_hi -= chunksize;                 // aligned to 4 Byte boundary
 		return (uint8_t *)BigBuf + BigBuf_hi;
 	}
 }
@@ -102,7 +121,7 @@ void BigBuf_print_status(void)
 {
 	Dbprintf("Memory");
 	Dbprintf("  BIGBUF_SIZE.............%d", BIGBUF_SIZE);
-	Dbprintf("  BigBuf_hi  .............%d", BigBuf_hi);
+	Dbprintf("  Available memory........%d", BigBuf_hi);
 	Dbprintf("Tracing");
 	Dbprintf("  tracing ................%d", tracing);
 	Dbprintf("  traceLen ...............%d", traceLen);
@@ -115,13 +134,21 @@ uint16_t BigBuf_max_traceLen(void)
 	return BigBuf_hi;
 }
 
+
 void clear_trace() {
 	traceLen = 0;
 }
 
+
 void set_tracing(bool enable) {
 	tracing = enable;
 }
+
+
+bool get_tracing(void) {
+	return tracing;
+}
+
 
 /**
  * Get the number of bytes traced
@@ -132,6 +159,7 @@ uint16_t BigBuf_get_traceLen(void)
 	return traceLen;
 }
 
+
 /**
   This is a function to store traces. All protocols can use this generic tracer-function.
   The traces produced by calling this function can be fetched on the client-side
@@ -141,19 +169,19 @@ uint16_t BigBuf_get_traceLen(void)
 **/
 bool RAMFUNC LogTrace(const uint8_t *btBytes, uint16_t iLen, uint32_t timestamp_start, uint32_t timestamp_end, uint8_t *parity, bool readerToTag)
 {
-	if (!tracing) return FALSE;
+	if (!tracing) return false;
 
 	uint8_t *trace = BigBuf_get_addr();
 
-	uint16_t num_paritybytes = (iLen-1)/8 + 1;	// number of valid paritybytes in *parity
-	uint16_t duration = timestamp_end - timestamp_start;
+	uint32_t num_paritybytes = (iLen-1)/8 + 1;  // number of valid paritybytes in *parity
+	uint32_t duration = timestamp_end - timestamp_start;
 
 	// Return when trace is full
 	uint16_t max_traceLen = BigBuf_max_traceLen();
 
 	if (traceLen + sizeof(iLen) + sizeof(timestamp_start) + sizeof(duration) + num_paritybytes + iLen >= max_traceLen) {
-		tracing = FALSE;	// don't trace any more
-		return FALSE;
+		tracing = false;    // don't trace any more
+		return false;
 	}
 	// Traceformat:
 	// 32 bits timestamp (little endian)
@@ -183,21 +211,25 @@ bool RAMFUNC LogTrace(const uint8_t *btBytes, uint16_t iLen, uint32_t timestamp_
 
 	// data bytes
 	if (btBytes != NULL && iLen != 0) {
-		memcpy(trace + traceLen, btBytes, iLen);
+		for (int i = 0; i < iLen; i++) {
+			trace[traceLen++] = *btBytes++;
+		}
 	}
-	traceLen += iLen;
 
 	// parity bytes
 	if (num_paritybytes != 0) {
 		if (parity != NULL) {
-			memcpy(trace + traceLen, parity, num_paritybytes);
+			for (int i = 0; i < num_paritybytes; i++) {
+				trace[traceLen++] = *parity++;
+			}
 		} else {
-			memset(trace + traceLen, 0x00, num_paritybytes);
+			for (int i = 0; i < num_paritybytes; i++) {
+				trace[traceLen++] = 0x00;
+			}
 		}
 	}
-	traceLen += num_paritybytes;
 
-	return TRUE;
+	return true;
 }
 
 
@@ -208,18 +240,23 @@ int LogTraceHitag(const uint8_t * btBytes, int iBits, int iSamples, uint32_t dwP
 	  that this logger takes number of bits as argument, not number of bytes.
 	  **/
 
-	if (!tracing) return FALSE;
+	if (!tracing) return false;
 
 	uint8_t *trace = BigBuf_get_addr();
 	uint16_t iLen = nbytes(iBits);
+
 	// Return when trace is full
-	if (traceLen + sizeof(rsamples) + sizeof(dwParity) + sizeof(iBits) + iLen > BigBuf_max_traceLen()) return FALSE;
+	if (traceLen + sizeof(rsamples) + sizeof(dwParity) + sizeof(iBits) + iLen > BigBuf_max_traceLen()) {
+		return false;
+	}
 
 	//Hitag traces appear to use this traceformat:
 	// 32 bits timestamp (little endian,Highest Bit used as readerToTag flag)
 	// 32 bits parity
 	// 8 bits size (number of bits in the trace entry, not number of bytes)
 	// y Bytes data
+
+
 
 	rsamples += iSamples;
 	trace[traceLen++] = ((rsamples >> 0) & 0xff);
@@ -237,22 +274,21 @@ int LogTraceHitag(const uint8_t * btBytes, int iBits, int iSamples, uint32_t dwP
 	trace[traceLen++] = ((dwParity >> 24) & 0xff);
 	trace[traceLen++] = iBits;
 
-	memcpy(trace + traceLen, btBytes, iLen);
-	traceLen += iLen;
+	for (int i = 0; i < iLen; i++) {
+		trace[traceLen++] = *btBytes++;
+	}
 
-	return TRUE;
+	return true;
 }
 
 
 // Emulator memory
 uint8_t emlSet(uint8_t *data, uint32_t offset, uint32_t length){
 	uint8_t* mem = BigBuf_get_EM_addr();
-	if(offset+length < CARD_MEMORY_SIZE)
-	{
+	if (offset+length < CARD_MEMORY_SIZE) {
 		memcpy(mem+offset, data, length);
 		return 0;
-	}else
-	{
+	} else {
 		Dbprintf("Error, trying to set memory outside of bounds! %d  > %d", (offset+length), CARD_MEMORY_SIZE);
 		return 1;
 	}

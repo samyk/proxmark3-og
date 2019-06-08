@@ -40,9 +40,6 @@
 #include "util.h"
 #include "string.h"
 
-typedef uint32_t uintmax_t;
-typedef int32_t intmax_t;
-
 typedef unsigned char u_char;
 typedef unsigned int u_int;
 typedef unsigned long u_long;
@@ -178,6 +175,7 @@ reswitch:	switch (ch = (u_char)*fmt++) {
 				padc = '0';
 				goto reswitch;
 			}
+			// intentionally fall through to next case
 		case '1': case '2': case '3': case '4':
 		case '5': case '6': case '7': case '8': case '9':
 				for (n = 0;; ++fmt) {

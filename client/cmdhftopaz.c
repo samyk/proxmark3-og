@@ -8,19 +8,21 @@
 // High frequency Topaz (NFC Type 1) commands
 //-----------------------------------------------------------------------------
 
+#include "cmdhftopaz.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include "cmdmain.h"
 #include "cmdparser.h"
-#include "cmdhftopaz.h"
 #include "cmdhf14a.h"
 #include "ui.h"
 #include "mifare.h"
-#include "proxmark3.h"
+#include "comms.h"
 #include "iso14443crc.h"
 #include "protocols.h"
+#include "taginfo.h"
 
 #define TOPAZ_STATIC_MEMORY	(0x0f * 8)		// 15 blocks with 8 Bytes each
 
@@ -337,7 +339,7 @@ static void topaz_print_control_TLVs(uint8_t *memory)
 		if (TLV_type == 0x02) {			// a Reserved Memory Control TLV
 			uint8_t pages_addr = TLV_value[0] >> 4;
 			uint8_t byte_offset = TLV_value[0] & 0x0f;
-			uint8_t size_in_bytes = TLV_value[1] ? TLV_value[1] : 256;
+			uint16_t size_in_bytes = TLV_value[1] ? TLV_value[1] : 256;
 			uint8_t bytes_per_page = 1 << (TLV_value[2] & 0x0f);
 			uint16_t area_start = pages_addr * bytes_per_page + byte_offset;
 			PrintAndLog("Reserved Memory of %d bytes at byte offset 0x%02x.", 
@@ -454,7 +456,7 @@ int CmdHFTopazReader(const char *Cmd)
 	PrintAndLog("HR0  : %02x (%sa Topaz tag (%scapable of carrying a NDEF message), %s memory map)", rid_response[0], 
 						(rid_response[0] & 0xF0) == 0x10 ? "" : "not ",
 						(rid_response[0] & 0xF0) == 0x10 ? "" : "not ",
-						(rid_response[0] & 0x0F) == 0x10 ? "static" : "dynamic");
+						(rid_response[0] & 0x0F) == 0x01 ? "static" : "dynamic");
 	PrintAndLog("HR1  : %02x", rid_response[1]);
 	
 	status = topaz_rall(uid_echo, rall_response);
@@ -476,7 +478,7 @@ int CmdHFTopazReader(const char *Cmd)
 			topaz_tag.uid[0]);
 	PrintAndLog("       UID[6] (Manufacturer Byte) = %02x, Manufacturer: %s", 
 			topaz_tag.uid[6], 
-			getTagInfo(topaz_tag.uid[6]));
+			getManufacturerName(topaz_tag.uid[6]));
 
 	memcpy(topaz_tag.data_blocks, rall_response+2, 0x0f*8);
 	PrintAndLog("");
@@ -553,10 +555,7 @@ static command_t CommandTable[] =
 
 
 int CmdHFTopaz(const char *Cmd) {
-	// flush
-	WaitForResponseTimeout(CMD_ACK,NULL,100);
-
-	// parse
+	(void)WaitForResponseTimeout(CMD_ACK,NULL,100);
 	CmdsParse(CommandTable, Cmd);
 	return 0;
 }

@@ -20,7 +20,7 @@
 #define MAX_PARITY_SIZE			((MAX_FRAME_SIZE + 7) / 8)
 #define MAX_MIFARE_FRAME_SIZE	18		// biggest Mifare frame is answer to a read (one block = 16 Bytes) + 2 Bytes CRC
 #define MAX_MIFARE_PARITY_SIZE	3		// need 18 parity bits for the 18 Byte above. 3 Bytes are enough to store these
-#define CARD_MEMORY_SIZE		4096	
+#define CARD_MEMORY_SIZE		4096
 #define DMA_BUFFER_SIZE    		128
 
 extern uint8_t *BigBuf_get_addr(void);
@@ -29,13 +29,15 @@ extern uint16_t BigBuf_max_traceLen(void);
 extern void BigBuf_Clear(void);
 extern void BigBuf_Clear_ext(bool verbose);
 extern void BigBuf_Clear_keep_EM(void);
+extern void BigBuf_Clear_EM(void);
 extern uint8_t *BigBuf_malloc(uint16_t);
 extern void BigBuf_free(void);
 extern void BigBuf_free_keep_EM(void);
 extern void BigBuf_print_status(void);
 extern uint16_t BigBuf_get_traceLen(void);
-extern void clear_trace();
+extern void clear_trace(void);
 extern void set_tracing(bool enable);
+extern bool get_tracing(void);
 extern bool RAMFUNC LogTrace(const uint8_t *btBytes, uint16_t iLen, uint32_t timestamp_start, uint32_t timestamp_end, uint8_t *parity, bool readerToTag);
 extern int LogTraceHitag(const uint8_t * btBytes, int iBits, int iSamples, uint32_t dwParity, int bReader);
 extern uint8_t emlSet(uint8_t *data, uint32_t offset, uint32_t length);

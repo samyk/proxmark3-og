@@ -22,7 +22,7 @@
  *
  * This is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
+ * by the Free Software Foundation, or, at your option, any later version. 
  *
  * This file is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -33,20 +33,20 @@
  * along with loclass.  If not, see <http://www.gnu.org/licenses/>.
  * 
  * 
- * 
  ****************************************************************************/
 
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
-#include <time.h>
+#include "util.h"
+#include "util_posix.h"
 #include "cipherutils.h"
 #include "cipher.h"
 #include "ikeys.h"
 #include "elite_crack.h"
 #include "fileutils.h"
-#include "des.h"
+#include "mbedtls/des.h"
 
 /**
  * @brief Permutes a key from standard NIST format to Iclass specific format
@@ -179,22 +179,22 @@ void rk(uint8_t *key, uint8_t n, uint8_t *outp_key)
     return;
 }
 
-static des_context ctx_enc = {DES_ENCRYPT,{0}};
-static des_context ctx_dec = {DES_DECRYPT,{0}};
+static mbedtls_des_context ctx_enc = { {0} };
+static mbedtls_des_context ctx_dec = { {0} };
 
 void desdecrypt_iclass(uint8_t *iclass_key, uint8_t *input, uint8_t *output)
 {
     uint8_t key_std_format[8] = {0};
     permutekey_rev(iclass_key, key_std_format);
-    des_setkey_dec( &ctx_dec, key_std_format);
-    des_crypt_ecb(&ctx_dec,input,output);
+    mbedtls_des_setkey_dec( &ctx_dec, key_std_format);
+    mbedtls_des_crypt_ecb(&ctx_dec,input,output);
 }
 void desencrypt_iclass(uint8_t *iclass_key, uint8_t *input, uint8_t *output)
 {
     uint8_t key_std_format[8] = {0};
     permutekey_rev(iclass_key, key_std_format);
-    des_setkey_enc( &ctx_enc, key_std_format);
-    des_crypt_ecb(&ctx_enc,input,output);
+    mbedtls_des_setkey_enc( &ctx_enc, key_std_format);
+    mbedtls_des_crypt_ecb(&ctx_enc,input,output);
 }
 
 /**
@@ -449,7 +449,7 @@ int bruteforceItem(dumpdata item, uint16_t keytable[])
  */
 int calculateMasterKey(uint8_t first16bytes[], uint64_t master_key[] )
 {
-	des_context ctx_e = {DES_ENCRYPT,{0}};
+	mbedtls_des_context ctx_e = { {0} };
 
 	uint8_t z_0[8] = {0};
 	uint8_t y_0[8] = {0};
@@ -468,8 +468,8 @@ int calculateMasterKey(uint8_t first16bytes[], uint64_t master_key[] )
 	permutekey_rev(z_0, z_0_rev);
 
 	// ~K_cus = DESenc(z[0], y[0])
-	des_setkey_enc( &ctx_e, z_0_rev );
-	des_crypt_ecb(&ctx_e, y_0, key64_negated);
+	mbedtls_des_setkey_enc( &ctx_e, z_0_rev );
+	mbedtls_des_crypt_ecb(&ctx_e, y_0, key64_negated);
 
 	int i;
 	for(i = 0; i < 8 ; i++)
@@ -482,8 +482,8 @@ int calculateMasterKey(uint8_t first16bytes[], uint64_t master_key[] )
 	uint8_t key64_stdformat[8] = {0};
 	permutekey_rev(key64, key64_stdformat);
 
-	des_setkey_enc( &ctx_e, key64_stdformat );
-	des_crypt_ecb(&ctx_e, key64_negated, result);
+	mbedtls_des_setkey_enc( &ctx_e, key64_stdformat );
+	mbedtls_des_crypt_ecb(&ctx_e, key64_negated, result);
 	prnlog("\nHigh security custom key (Kcus):");
 	printvar("Std format   ", key64_stdformat,8);
 	printvar("Iclass format", key64,8);
@@ -512,7 +512,7 @@ int bruteforceDump(uint8_t dump[], size_t dumpsize, uint16_t keytable[])
 	uint8_t i;
 	int errors = 0;
 	size_t itemsize = sizeof(dumpdata);
-	clock_t t1 = clock();
+	uint64_t t1 = msclock();
 
 	dumpdata* attack = (dumpdata* ) malloc(itemsize);
 
@@ -522,9 +522,9 @@ int bruteforceDump(uint8_t dump[], size_t dumpsize, uint16_t keytable[])
 		errors += bruteforceItem(*attack, keytable);
 	}
 	free(attack);
-	t1 = clock() - t1;
-	float diff = ((float)t1 / CLOCKS_PER_SEC );
-	prnlog("\nPerformed full crack in %f seconds",diff);
+	t1 = msclock() - t1;
+	float diff = (float)t1 / 1000.0;
+	prnlog("\nPerformed full crack in %f seconds", diff);
 
 	// Pick out the first 16 bytes of the keytable.
 	// The keytable is now in 16-bit ints, where the upper 8 bits
